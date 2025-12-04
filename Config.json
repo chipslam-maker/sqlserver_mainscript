@@ -1,0 +1,12 @@
+{
+  "DatabaseConfig": {
+    "SqlServer": "Your DB SERVER Name",
+    "Database": "Your DATABASE Name",
+    "Schema": "Your SCHEMA Name",
+    "OriginalTable": "Your ORG TABLE Name",
+    "DateColumnName": "Your Date Column Name"
+  },
+  "CleanupOptions": {
+    "RetentionDays": 100
+  }
+}
