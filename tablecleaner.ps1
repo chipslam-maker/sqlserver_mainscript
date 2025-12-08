@@ -114,9 +114,13 @@ try {
     $CreateTableScriptCollection = $OriginalTableSMO.Script($ScriptOptions)
     $CreateTableScript = ($CreateTableScriptCollection -join "`r`n")
 
+    # $CreateTableScript = $CreateTableScript -replace "\[$Schema\]\.\[$OriginalTable\]", "[$Schema].[" + $OriginalTable + "_TEMP]"
+    # $CreateTableScript = $CreateTableScript -replace "$Schema\.$OriginalTable", "$Schema." + $OriginalTable + "_TEMP"
     # Replace the original table name with the temporary name for the creation script
-    $CreateTableScript = $CreateTableScript -replace "\[$Schema\]\.\[$OriginalTable\]", "[$Schema].[" + $OriginalTable + "_TEMP]"
-    $CreateTableScript = $CreateTableScript -replace "$Schema\.$OriginalTable", "$Schema." + $OriginalTable + "_TEMP"
+    $SearchPattern = [regex]::Escape("[$Schema].[$OriginalTable]")
+    $ReplaceString = "[$Schema].[" + $OriginalTable + "_TEMP]"
+    $CreateTableScript = $CreateTableScript -replace $SearchPattern, $ReplaceString
+    
 
     # --- Dynamically Generate INSERT Column List (Excluding Computed Columns) ---
     $DataColumns = @()
