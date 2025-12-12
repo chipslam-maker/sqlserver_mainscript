@@ -36,7 +36,24 @@
     - Requires Windows Authentication and network access between A and B for four-part naming.
     - Uses TrustServerCertificate=True for flexible connection.
 #>
+# ===============================================
+# Dependency Check and Module Import
+# ===============================================
 
+# 1. Check if SqlServer module is installed
+if (-not (Get-Module -ListAvailable -Name 'SqlServer')) {
+    Write-Error "The 'SqlServer' PowerShell module is required. Please install it using: Install-Module SqlServer"
+    exit 1
+}
+
+# 2. Force import the SqlServer module (This automatically loads the correct SMO assemblies)
+try {
+    Import-Module SqlServer -Force -ErrorAction Stop
+    Write-Host "SqlServer module and SMO assemblies loaded successfully." -ForegroundColor Green
+} catch {
+    Write-Error "Failed to load SqlServer module. Error: $($_.Exception.Message)"
+    exit 1
+}
 # ===============================================
 # Parameter Configuration (Read from Config.json File)
 # ===============================================
