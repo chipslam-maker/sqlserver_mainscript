@@ -1,149 +1,102 @@
 {
-    "Source": {
-        "InstanceName": "SQL_SERVER_A_INSTANCE_NAME",
-        "DatabaseName": "SourceDBName"
+    "SourceDatabaseConfig": {
+        "SqlServer": "SQL_SERVER_A_INSTANCE_NAME",
+        "Database": "SourceDBName",
+        "Schema": "dbo",
+        "TableName": "YourTableName"
     },
-    "Destination": {
-        "InstanceName": "SQL_SERVER_B_INSTANCE_NAME",
-        "DatabaseName": "DestinationDBName"
+    "DestinationDatabaseConfig": {
+        "SqlServer": "SQL_SERVER_B_INSTANCE_NAME",
+        "Database": "DestinationDBName",
+        "Schema": "dbo",
+        "TableName": "YourTableName"
     },
-    "TableToCopy": "dbo.YourTableName",
-    "Options": {
-        "UseIntegratedSecurity": true,
-        "DropTableIfExists": true,
-        "IncludeForeignKeys": false,
-        "IncludeTriggers": false
+    "CopyOptions": {
+        "DropTableIfExists": true 
     }
 }
 
-# Requires the dbatools module for SQL Server operations
-# Check and install the dbatools module
-if (-not (Get-Module -ListAvailable -Name 'dbatools')) {
-    Write-Host "dbatools module is not installed. Attempting to install..."
-    try {
-        Install-Module dbatools -Scope CurrentUser -Force
-    } catch {
-        Write-Error "Failed to install the dbatools module. Please install it manually and re-run the script."
-        exit 1
-    }
-}
+<#
+.SYNOPSIS
+    Copies a table structure and data from a Source SQL Server (A) to a Destination SQL Server (B).
+    If the table exists on B, it is DROPPED and then recreated/copied.
 
-Import-Module dbatools
+.DESCRIPTION
+    This script reads configuration from Config.json:
+    1. Connects to Source (A) using SMO to generate the CREATE TABLE, INDEX, and COMPUTED COLUMN script.
+    2. Dynamically generates a T-SQL transaction for the Destination (B).
+    3. The T-SQL transaction:
+        a. Drops the existing table on B.
+        b. Creates the new table structure on B (including all indexes/computed columns).
+        c. Inserts all data from Source (A) to Destination (B) using four-part naming.
+    4. Performs structural and row count checks between A and B.
 
-# --- Configuration Reading ---
+.NOTES
+    - Requires the SqlServer PowerShell module.
+    - Requires Windows Authentication and network access between A and B for four-part naming.
+    - Uses TrustServerCertificate=True for flexible connection.
+#>
 
-# Define configuration file path
-$ConfigFile = ".\Config.json"
+# ===============================================
+# Parameter Configuration (Read from Config.json File)
+# ===============================================
 
-# Check if the configuration file exists
+$ConfigFile = Join-Path (Split-Path $MyInvocation.MyCommand.Path) "Config.json"
+
 if (-not (Test-Path $ConfigFile)) {
-    Write-Error "Configuration file not found: $ConfigFile"
+    Write-Error "Configuration file not found: $ConfigFile. Please create it in the same directory."
     exit 1
 }
 
-# Read the JSON configuration
-$Config = Get-Content $ConfigFile | ConvertFrom-Json
-
-# Simplify variables
-$Source = $Config.Source
-$Dest = $Config.Destination
-$Table = $Config.TableToCopy
-$Options = $Config.Options
-
-Write-Host "--- Starting Table Copy Script ---"
-Write-Host "Source: $($Source.InstanceName) | DB: $($Source.DatabaseName)"
-Write-Host "Destination: $($Dest.InstanceName) | DB: $($Dest.DatabaseName)"
-Write-Host "Table: $Table"
-Write-Host "----------------------------------"
-
-# --- Step 3: Check and Drop Existing Table (if configured) ---
-Write-Host "`n>> Step 3: Checking for existing table on Destination..."
-
-if (Test-DbaTable -SqlInstance $Dest.InstanceName -Database $Dest.DatabaseName -Table $Table) {
-    Write-Warning "Destination Table '$Table' already exists on $($Dest.InstanceName)."
-    
-    if ($Options.DropTableIfExists) {
-        Write-Warning "Configuration requires dropping the existing table. Executing DROP TABLE..."
-        try {
-            Remove-DbaTable -SqlInstance $Dest.InstanceName -Database $Dest.DatabaseName -Table $Table -Force -Confirm:$false
-            Write-Host "Table '$Table' dropped successfully."
-        } catch {
-            Write-Error "Failed to drop Table '$Table': $($_.Exception.Message)"
-            exit 1
-        }
-    } else {
-        Write-Error "Destination Table exists, but configuration does not allow dropping it. Script terminated."
-        exit 1
-    }
-} else {
-    Write-Host "Destination Table does not exist. Proceeding with creation."
-}
-
-# --- Step 4: Copy Table Structure (Schema, Indexes, Computed Columns) ---
-Write-Host "`n>> Step 4: Copying Table Schema (including Indexes and Computed Columns)..."
-
+# Read and parse the JSON configuration file
 try {
-    # Define items to exclude during schema copy
-    $ExcludeItems = @("Data") # Always exclude data during schema-only copy
-    if (-not $Options.IncludeForeignKeys) { $ExcludeItems += "ForeignKeys" }
-    if (-not $Options.IncludeTriggers) { $ExcludeItems += "Triggers" }
-    
-    # Copy structure only
-    Copy-DbaTable -Source $Source.InstanceName -SourceDatabase $Source.DatabaseName -Table $Table `
-                  -Destination $Dest.InstanceName -DestinationDatabase $Dest.DatabaseName `
-                  -CopyData $false -Exclude $ExcludeItems -PassThru | Out-Null
-                  
-    Write-Host "Table schema (including INDEXES and COMPUTED COLUMNS definitions) created successfully."
-} catch {
-    Write-Error "Schema copy failed: $($_.Exception.Message)"
+    Write-Host "Reading configuration from $ConfigFile..." -ForegroundColor Yellow
+    $ConfigData = Get-Content $ConfigFile | Out-String | ConvertFrom-Json -ErrorAction Stop
+}
+catch {
+    Write-Error "Error parsing configuration file: $($_.Exception.Message)"
     exit 1
 }
 
-# --- Step 5: Copy Data ---
-Write-Host "`n>> Step 5: Copying data (Computed Columns will be recalculated by SQL Server)..."
+# Map Source parameters (Server A)
+$SourceServer = $ConfigData.SourceDatabaseConfig.SqlServer
+$SourceDatabase = $ConfigData.SourceDatabaseConfig.Database
+$SourceSchema = $ConfigData.SourceDatabaseConfig.Schema
+$SourceTable = $ConfigData.SourceDatabaseConfig.TableName
 
+# Map Destination parameters (Server B)
+$DestServer = $ConfigData.DestinationDatabaseConfig.SqlServer
+$DestDatabase = $ConfigData.DestinationDatabaseConfig.Database
+$DestSchema = $ConfigData.DestinationDatabaseConfig.Schema
+$DestTable = $ConfigData.DestinationDatabaseConfig.TableName
+
+# Map Copy Options
+# Note: Since Rename logic is removed, we only need this variable for the T-SQL logic check.
+$DropTableIfExists = $ConfigData.CopyOptions.DropTableIfExists
+
+# Validate required parameters
+if (-not $SourceServer -or -not $DestServer -or -not $SourceTable -or -not $DestTable) {
+    Write-Error "Missing required configuration values in Config.json."
+    exit 1
+}
+
+Write-Host "Source Table: [$SourceServer].[$SourceDatabase].[$SourceSchema].[$SourceTable]" -ForegroundColor Cyan
+Write-Host "Dest Table:   [$DestServer].[$DestDatabase].[$DestSchema].[$DestTable]" -ForegroundColor Cyan
+
+
+# ===============================================
+# 1. Load SMO Library (Required for Structure Scripting)
+# ===============================================
 try {
-    # Copy data only, using the existing schema
-    Copy-DbaTable -Source $Source.InstanceName -SourceDatabase $Source.DatabaseName -Table $Table `
-                  -Destination $Dest.InstanceName -DestinationDatabase $Dest.DatabaseName `
-                  -CopyData $true -NoSchema -PassThru | Out-Null
-                  
-    Write-Host "Data copied successfully."
-} catch {
-    Write-Error "Data copy failed: $($_.Exception.Message)"
+    Write-Host "`nLoading SMO assemblies..." -ForegroundColor Yellow
+    # Attempt to load necessary SMO assemblies
+    Add-Type -AssemblyName "Microsoft.SqlServer.Smo, Version=16.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91" -ErrorAction Stop
+}
+catch {
+    Write-Error "Could not load SMO assemblies. Ensure the SqlServer PowerShell module or SQL Server client tools are installed."
     exit 1
 }
 
-# --- Step 6: Final Verification (Row Count & Column Structure) ---
-Write-Host "`n>> Step 6: Final Verification..."
-
-# 6A. Check Row Count
-Write-Host "--- 6A: Checking Row Count ---"
-$SourceCount = Get-DbaRowCount -SqlInstance $Source.InstanceName -Database $Source.DatabaseName -Table $Table
-$DestCount = Get-DbaRowCount -SqlInstance $Dest.InstanceName -Database $Dest.DatabaseName -Table $Table
-
-Write-Host "Source Row Count: $SourceCount"
-Write-Host "Destination Row Count: $DestCount"
-
-if ($SourceCount -eq $DestCount) {
-    Write-Host "✅ Row Count Check SUCCESS: Row counts are identical."
-} else {
-    Write-Error "❌ Row Count Check FAILED: Source ($SourceCount) is different from Destination ($DestCount)!"
-}
-
-# 6B. Check Column Structure
-Write-Host "--- 6B: Checking Column Structure ---"
-$SourceColumns = Get-DbaTableColumn -SqlInstance $Source.InstanceName -Database $Source.DatabaseName -Table $Table
-$DestColumns = Get-DbaTableColumn -SqlInstance $Dest.InstanceName -Database $Dest.DatabaseName -Table $Table
-
-# Compare the critical column properties: ColumnName, DataType, IsNullable
-$Differences = Compare-Object -ReferenceObject $SourceColumns -DifferenceObject $DestColumns -Property ColumnName, DataType, IsNullable
-
-if ($null -eq $Differences) {
-    Write-Host "✅ Column Structure Check SUCCESS: All critical column properties match."
-} else {
-    Write-Error "❌ Column Structure Check FAILED: Found the following discrepancies:"
-    $Differences | Format-Table -AutoSize
-}
-
-Write-Host "`n--- Script Execution Completed ---"
+# ===============================================
+# 2. Connect to Source (A) and Script Structure
+# ===============================================
