@@ -34,3 +34,21 @@ FROM [SSISDB].[catalog].[folders] f
 JOIN [SSISDB].[catalog].[environments] e ON f.folder_id = e.folder_id
 JOIN [SSISDB].[catalog].[environment_variables] v ON e.environment_id = v.environment_id
 WHERE f.name IN ('TEST', 'PRO');
+
+
+
+
+
+
+
+
+
+USE [SSISDB]
+GO
+
+EXEC [catalog].[set_environment_variable_value] 
+    @folder_name = N'TEST',           -- 資料夾名稱 (TEST 或 PRO)
+    @environment_name = N'MyEnv',     -- 環境名稱
+    @variable_name = N'MyServerName', -- 變數名稱
+    @value = N'New_Server_Address';   -- 你要設定的新值
+GO
