@@ -1,34 +1,53 @@
-# 設定檔案路徑與目標資料夾/專案名稱
-$paramsFilePath = "C:\YourPath\Project.params" # 請修改為你的檔案路徑
-$folderName = "TEST"
-$projectName = "YourProjectName"
+# --- 設定區 ---
+$paramsFilePath = "C:\YourPath\Project.params" # 指向你的 Project.params 路徑
+$outputFile = "UpdateParams.sql"
+$folderName = "TEST"        # Server B 上的資料夾名稱
+$projectName = "YourProject" # Server B 上的專案名稱
 
-# 載入 XML 內容
+# --- 執行邏輯 ---
 [xml]$xml = Get-Content $paramsFilePath
 
-$sqlScripts = @()
+# 處理 XML 命名空間
+$ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+$ns.AddNamespace("SSIS", "www.microsoft.com/SqlServer/SSIS")
 
-# 遍歷 XML 中的每一個 Parameter
-foreach ($param in $xml.Parameters.Parameter) {
-    $name = $param.Name
-    $isSensitive = if ($param.Sensitive -eq "1") { 1 } else { 0 }
-    $dataType = $param.DataType # SSIS 內部的數據類型編號
+$sqlResults = @()
+$sqlResults += "USE [SSISDB];`nGO`n"
+
+# 取得所有參數節點
+$parameters = Select-Xml -Xml $xml -XPath "//SSIS:Parameter" -Namespace $ns
+
+foreach ($p in $parameters) {
+    # 提取參數名稱
+    $paramName = $p.Node.Attributes["SSIS:Name"].Value
     
-    # 處理數值 (如果是 Sensitive 則設為 NULL)
-    $value = if ($isSensitive -eq 1) { "NULL" } else { "N'" + $param.Properties.Property.InnerText + "'" }
+    # 提取 Value 內容
+    $valueNode = $p.Node.SelectSingleNode("SSIS:Properties/SSIS:Property[@SSIS:Name='Value']", $ns)
+    $paramValue = $valueNode.InnerText
+    
+    # 檢查是否為 Sensitive (如果是，SQL 設為 NULL 提醒手動輸入)
+    $sensitiveNode = $p.Node.SelectSingleNode("SSIS:Properties/SSIS:Property[@SSIS:Name='Sensitive']", $ns)
+    
+    if ($sensitiveNode.InnerText -eq "1") {
+        $finalValue = "NULL -- <!! 需要手動填入加密資訊 !!>"
+    } else {
+        # 處理 SQL 字串中的單引號，防止注入錯誤
+        $escapedValue = $paramValue.Replace("'", "''")
+        $finalValue = "N'$escapedValue'"
+    }
 
-    # 產生 SSISDB 的 set_object_parameter_value 指令
-    # 注意：Project Parameter 的 object_type 是 20
+    # 組合 T-SQL
     $sql = "EXEC [catalog].[set_object_parameter_value] 
         @object_type = 20, 
         @folder_name = N'$folderName', 
         @project_name = N'$projectName', 
-        @parameter_name = N'$name', 
-        @parameter_value = $value;"
+        @parameter_name = N'$paramName', 
+        @parameter_value = $finalValue;
+    GO"
     
-    $sqlScripts += $sql
+    $sqlResults += $sql
 }
 
-# 輸出到螢幕或儲存成檔案
-$sqlScripts | Out-File "UpdateProjectParams.sql"
-Write-Host "T-SQL 腳本已產生至 UpdateProjectParams.sql" -ForegroundColor Green
+# 輸出檔案
+$sqlResults | Out-File $outputFile -Encoding utf8
+Write-Host "成功！SQL 腳本已產生至: $outputFile" -ForegroundColor Green
