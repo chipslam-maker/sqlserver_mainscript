@@ -1,0 +1,34 @@
+# 設定檔案路徑與目標資料夾/專案名稱
+$paramsFilePath = "C:\YourPath\Project.params" # 請修改為你的檔案路徑
+$folderName = "TEST"
+$projectName = "YourProjectName"
+
+# 載入 XML 內容
+[xml]$xml = Get-Content $paramsFilePath
+
+$sqlScripts = @()
+
+# 遍歷 XML 中的每一個 Parameter
+foreach ($param in $xml.Parameters.Parameter) {
+    $name = $param.Name
+    $isSensitive = if ($param.Sensitive -eq "1") { 1 } else { 0 }
+    $dataType = $param.DataType # SSIS 內部的數據類型編號
+    
+    # 處理數值 (如果是 Sensitive 則設為 NULL)
+    $value = if ($isSensitive -eq 1) { "NULL" } else { "N'" + $param.Properties.Property.InnerText + "'" }
+
+    # 產生 SSISDB 的 set_object_parameter_value 指令
+    # 注意：Project Parameter 的 object_type 是 20
+    $sql = "EXEC [catalog].[set_object_parameter_value] 
+        @object_type = 20, 
+        @folder_name = N'$folderName', 
+        @project_name = N'$projectName', 
+        @parameter_name = N'$name', 
+        @parameter_value = $value;"
+    
+    $sqlScripts += $sql
+}
+
+# 輸出到螢幕或儲存成檔案
+$sqlScripts | Out-File "UpdateProjectParams.sql"
+Write-Host "T-SQL 腳本已產生至 UpdateProjectParams.sql" -ForegroundColor Green
