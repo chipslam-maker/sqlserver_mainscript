@@ -1,33 +1,35 @@
-# 1. 設定
+# ==========================================
+# PET 數據比對工具 (支援 SP/Table & 彈性組合鍵)
+# ==========================================
+
+# 1. 伺服器連線設定
 $serverA = "ServerA"
 $serverB = "ServerB"
 $dbA = "DB_A"
 $dbB = "DB_B"
-
-# --- 【切換模式】 ---
-# 如果要查 Table，請設為 $true 並輸入 SQL 語句
-$useTableQuery = $true 
-$queryText = "SELECT * FROM dbo.YourTableName WHERE Date = '2026-01-16'" # 如果是 Table 查詢
-$spName = "YourStoredProcedureName"                                      # 如果是 SP
-
-# 組合鍵設定
-$key1 = "KeyColumn1"
-$key2 = "KeyColumn2"
-
 $connStrA = "Server=$serverA;Database=$dbA;Integrated Security=True;TrustServerCertificate=True;"
 $connStrB = "Server=$serverB;Database=$dbB;Integrated Security=True;TrustServerCertificate=True;"
+
+# 2. 查詢模式設定
+$useTableQuery = $true   # $true = 使用 SQL 語句, $false = 使用 Stored Procedure
+$queryText = "SELECT * FROM dbo.YourTable WHERE Date = '2026-01-16'" # SQL 模式使用
+$spName = "YourStoredProcedureName"                                  # SP 模式使用
+$testDate = "2026-01-16"                                             # SP 參數值
+$paramName = "@YourParamName"                                        # SP 參數名
+
+# 3. 組合鍵設定 (Key2 可為 $null)
+$key1 = "KeyColumn1"
+$key2 = "KeyColumn2"
 
 function Get-SqlData($connStr, $text, $isTable) {
     $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
     $cmd = New-Object System.Data.SqlClient.SqlCommand($text, $conn)
     
-    # 判斷是執行 Table 查詢還是 SP
     if ($isTable) {
         $cmd.CommandType = [System.Data.CommandType]::Text
     } else {
         $cmd.CommandType = [System.Data.CommandType]::StoredProcedure
-        # 如果是 SP 且需要參數，請在此加入：
-        # $cmd.Parameters.AddWithValue("@ParamName", "2026-01-16") | Out-Null
+        $cmd.Parameters.AddWithValue($paramName, $testDate) | Out-Null
     }
 
     $da = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
@@ -37,51 +39,66 @@ function Get-SqlData($connStr, $text, $isTable) {
 }
 
 try {
-    $currentAction = if ($useTableQuery) { "Table 查詢" } else { "SP 執行" }
-    Write-Host "⏳ 正在透過 $currentAction 抓取並分析差異..." -ForegroundColor Gray
+    $action = if ($useTableQuery) { "Table 查詢" } else { "SP 執行" }
+    Write-Host "⏳ [PET] 正在從兩台伺服器抓取 $action 數據..." -ForegroundColor Gray
     
     $finalQuery = if ($useTableQuery) { $queryText } else { $spName }
     $dataA = Get-SqlData $connStrA $finalQuery $useTableQuery
     $dataB = Get-SqlData $connStrB $finalQuery $useTableQuery
 
-    # 2. 獲取欄位清單
+    # 獲取所有欄位名稱
     $columnNames = $dataA.Columns | Select-Object -ExpandProperty ColumnName
     
-    # 3. 使用 Compare-Object 進行初步比對
+    Write-Host "🔍 [PET] 正在比對 100+ 欄位差異..." -ForegroundColor Cyan
+    
+    # 4. 初步找出有差異的行 (基於內容比對)
     $diffResults = Compare-Object -ReferenceObject $dataA -DifferenceObject $dataB -Property $columnNames -PassThru
 
-    # 4. 分析具體欄位差異
+    # 5. 分析每一行差異具體發生在哪個 Column
     $finalReport = foreach ($item in $diffResults) {
         $diffCols = New-Object System.Collections.Generic.List[string]
         
-        # 組合鍵定位
-        $match = { $_.$key1 -eq $item.$key1 -and $_.$key2 -eq $item.$key2 }
-        $otherRow = if ($item.SideIndicator -eq "<=") { $dataB | Where-Object $match } else { $dataA | Where-Object $match }
+        # 彈性組合鍵匹配邏輯 (處理 Key2 為空的情況)
+        $matchLogic = { 
+            $_.$key1 -eq $item.$key1 -and 
+            (
+                ($null -ne $item.$key2 -and $_.$key2 -eq $item.$key2) -or 
+                ($null -eq $item.$key2 -and $null -eq $_.$key2)
+            )
+        }
+
+        # 尋找對應伺服器中的同一筆資料
+        $otherRow = if ($item.SideIndicator -eq "<=") { 
+            $dataB | Where-Object $matchLogic | Select-Object -First 1 
+        } else { 
+            $dataA | Where-Object $matchLogic | Select-Object -First 1 
+        }
 
         if ($null -ne $otherRow) {
             foreach ($colName in $columnNames) {
-                # 排除 Different_Columns 自身不比對
+                # 轉成字串比對，避免類型不一致導致誤判
                 if ("$($item.$colName)" -ne "$($otherRow.$colName)") {
                     $diffCols.Add($colName)
                 }
             }
         } else {
-            $diffCols.Add("!!! 另一伺服器缺失此 Key !!!")
+            $diffCols.Add("!!! 另一伺服器缺失此組合鍵 !!!")
         }
 
-        # 組合輸出物件
+        # 組合輸出結果，保留 SideIndicator 並將不同欄位放在最前面
         $item | Select-Object @{N='SideIndicator'; E={$_.SideIndicator}}, 
                             @{N='Different_Columns'; E={$diffCols -join ", "}}, 
                             *
     }
 
-    # 5. 輸出結果
+    # 6. 輸出結果與互動顯示
     if ($null -eq $finalReport) {
-        Write-Host "✅ 數據完全一致！" -ForegroundColor Green
+        Write-Host "✅ [PET] 數據完全一致！所有欄位均無差異。" -ForegroundColor Green
     } else {
-        $finalReport | Out-GridView -Title "比對結果 ($currentAction)"
+        Write-Host "❌ [PET] 發現差異！正在開啟 GridView 視窗..." -ForegroundColor Red
+        $finalReport | Out-GridView -Title "PET 比對工具 - (<=:ServerA, =>:ServerB)"
     }
 }
 catch {
-    Write-Error "執行失敗: $($_.Exception.Message)"
+    Write-Error "❌ 執行失敗: $($_.Exception.Message)"
 }
