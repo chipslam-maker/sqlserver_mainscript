@@ -1,0 +1,17 @@
+[
+    {
+        "TableName": "dbo.Orders",
+        "Key1": "OrderID",
+        "Key2": ""
+    },
+    {
+        "TableName": "dbo.ProductDetails",
+        "Key1": "CategoryID",
+        "Key2": "ProductID"
+    },
+    {
+        "TableName": "dbo.UserProfiles",
+        "Key1": "UserID",
+        "Key2": "Email"
+    }
+]
