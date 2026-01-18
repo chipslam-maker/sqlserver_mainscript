@@ -1,8 +1,15 @@
-# ==========================================
-# PET 批次數據比對工具 (支援 JSON Config)
-# ==========================================
+# 自動偵測路徑：這會抓取此 .ps1 檔案所在的目錄
+$currentFolder = $PSScriptRoot
+$configPath = Join-Path -Path $currentFolder -ChildPath "config.json"
 
-# 1. 基礎連線設定 (已加入 Cert Trust)
+Write-Host "📂 當前工作目錄: $currentFolder" -ForegroundColor Gray
+
+if (-not (Test-Path $configPath)) {
+    Write-Host "❌ 錯誤: 在同目錄下找不到 config.json！" -ForegroundColor Red
+    return
+}
+
+# 基礎連線設定
 $serverA = "ServerA"
 $serverB = "ServerB"
 $dbA = "DB_A"
@@ -10,9 +17,8 @@ $dbB = "DB_B"
 $connStrA = "Server=$serverA;Database=$dbA;Integrated Security=True;TrustServerCertificate=True;"
 $connStrB = "Server=$serverB;Database=$dbB;Integrated Security=True;TrustServerCertificate=True;"
 
-# 2. 讀取 Config 檔案
-$configPath = "C:\YourPath\config.json" # 請修改為你的實際路徑
-$tableConfigs = Get-Content $configPath | ConvertFrom-Json
+# 讀取 JSON
+$tableConfigs = Get-Content $configPath -Raw | ConvertFrom-Json 
 
 function Get-SqlData($connStr, $tableName) {
     $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
