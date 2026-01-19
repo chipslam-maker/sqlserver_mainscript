@@ -5,13 +5,19 @@
         "Key2": ""
     },
     {
-        "TableName": "dbo.ProductDetails",
-        "Key1": "CategoryID",
-        "Key2": "ProductID"
+        "StoreProcedure": "Report.dbo.uspGetDailySales",
+        "Key1": "SalesID",
+        "Key2": "CustomerID",
+        "Param1Name": "RunDate",
+        "Param1Value": "2026-01-19",
+        "Param2Name": "AreaCode",
+        "Param2Value": "M20"
     },
     {
-        "TableName": "dbo.UserProfiles",
-        "Key1": "UserID",
-        "Key2": "Email"
+        "StoreProcedure": "dbo.uspGetSimpleList",
+        "Key1": "ID",
+        "Key2": "",
+        "Param1Name": "IsActive",
+        "Param1Value": "1"
     }
 ]
