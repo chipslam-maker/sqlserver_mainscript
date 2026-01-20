@@ -1,0 +1,96 @@
+CREATE PROCEDURE [dbo].[usp_CompareTablesAndLog_v2012]
+    @SourceServer NVARCHAR(128),
+    @SourceDB     NVARCHAR(128),
+    @TargetServer NVARCHAR(128),
+    @TargetDB     NVARCHAR(128),
+    @TableName    NVARCHAR(128),
+    @IgnoreCols   NVARCHAR(MAX) -- 例如 'ID,CreateDate'
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @ColumnList NVARCHAR(MAX);
+    DECLARE @DynamicSQL NVARCHAR(MAX);
+    DECLARE @SourcePath NVARCHAR(500) = QUOTENAME(@SourceServer) + '.' + QUOTENAME(@SourceDB) + '.dbo.' + QUOTENAME(@TableName);
+    DECLARE @TargetPath NVARCHAR(500) = QUOTENAME(@TargetServer) + '.' + QUOTENAME(@TargetDB) + '.dbo.' + QUOTENAME(@TableName);
+
+    -- 1. 建立 Log Table (如果不存在)
+    -- SQL 2012 不支援 JSON 型態，改用 NVARCHAR(MAX)
+    IF OBJECT_ID('CheckLogTable', 'U') IS NULL
+    BEGIN
+        CREATE TABLE CheckLogTable (
+            LogID INT IDENTITY(1,1) PRIMARY KEY,
+            CheckTime DATETIME DEFAULT GETDATE(),
+            TableName NVARCHAR(255),
+            CheckType NVARCHAR(50),
+            RowContent XML -- 2012 版本建議存成 XML 格式
+        );
+    END
+
+    -- 2. 獲取並拼接欄位清單 (SQL 2012 兼容寫法)
+    -- 使用 FOR XML PATH 替代 STRING_AGG
+    DECLARE @GetColsSQL NVARCHAR(MAX) = '
+        SELECT @Cols = STUFF((
+            SELECT '','' + QUOTENAME(name)
+            FROM ' + QUOTENAME(@SourceDB) + '.sys.columns 
+            WHERE object_id = OBJECT_ID(''' + @SourcePath + ''')
+            AND name NOT IN (
+                SELECT LTRIM(RTRIM(m.n.value(''.[1]'',''varchar(8000)'')))
+                FROM (SELECT CAST(''<X>'' + REPLACE(@IgnoreList, '','', ''</X><X>'') + ''</X>'' AS XML) AS x) AS t
+                CROSS APPLY x.nodes(''/X'') AS m(n)
+            )
+            FOR XML PATH('''')), 1, 1, '''')';
+
+    EXEC sp_executesql @GetColsSQL, 
+        N'@IgnoreList NVARCHAR(MAX), @Cols NVARCHAR(MAX) OUTPUT', 
+        @IgnoreList = @IgnoreCols, @Cols = @ColumnList OUTPUT;
+
+    IF @ColumnList IS NULL
+    BEGIN
+        RAISERROR('Error: Table not found or all columns ignored.', 16, 1);
+        RETURN;
+    END
+
+    -- 3. 執行 EXCEPT：將差異寫入 Log
+    -- 使用 FOR XML AUTO 將結果包成 XML 存入
+    SET @DynamicSQL = '
+        INSERT INTO CheckLogTable (TableName, CheckType, RowContent)
+        SELECT ''' + @TableName + ''', ''EXCEPT_DIFF'', (SELECT t.* FOR XML PATH(''Row''), ROOT(''Data''))
+        FROM (
+            SELECT ' + @ColumnList + ' FROM ' + @SourcePath + '
+            EXCEPT
+            SELECT ' + @ColumnList + ' FROM ' + @TargetPath + '
+        ) AS t;';
+    EXEC sp_executesql @DynamicSQL;
+
+    -- 4. 執行 INTERSECT & COUNT 檢查
+    DECLARE @SourceCount INT, @TargetCount INT, @IntersectCount INT;
+    DECLARE @CountSQL NVARCHAR(MAX);
+
+    SET @CountSQL = '
+        SELECT @src = (SELECT COUNT(*) FROM ' + @SourcePath + '),
+               @tgt = (SELECT COUNT(*) FROM ' + @TargetPath + '),
+               @isect = (SELECT COUNT(*) FROM (
+                            SELECT ' + @ColumnList + ' FROM ' + @SourcePath + '
+                            INTERSECT
+                            SELECT ' + @ColumnList + ' FROM ' + @TargetPath + '
+                         ) AS t)';
+
+    EXEC sp_executesql @CountSQL, 
+        N'@src INT OUTPUT, @tgt INT OUTPUT, @isect INT OUTPUT', 
+        @src = @SourceCount OUTPUT, @tgt = @TargetCount OUTPUT, @isect = @IntersectCount OUTPUT;
+
+    -- 5. 輸出結果到 Output
+    PRINT '--------------------------------------------------';
+    PRINT 'Comparison Result for: ' + @TableName;
+    PRINT 'Source Count: ' + CAST(@SourceCount AS VARCHAR(10));
+    PRINT 'Target Count: ' + CAST(@TargetCount AS VARCHAR(10));
+    PRINT 'Intersect Count: ' + CAST(@IntersectCount AS VARCHAR(10));
+
+    IF (@SourceCount = @TargetCount AND @SourceCount = @IntersectCount)
+        PRINT 'SUCCESS: Data is perfectly synchronized.';
+    ELSE
+        PRINT 'WARNING: Data mismatch detected! Check [CheckLogTable] for details.';
+    PRINT '--------------------------------------------------';
+
+END
