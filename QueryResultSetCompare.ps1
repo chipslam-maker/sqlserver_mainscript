@@ -30,6 +30,23 @@ if ($oldData.Rows.Count -ne $newData.Rows.Count) {
 # 3. 完全比對 (包括所有 Column 內容)
 $diff = Compare-Object $oldData $newData -Property ( $oldData.Columns.ColumnName ) -PassThru
 
+# 假設 $diff 是你 Compare-Object 的結果
+if ($diff) {
+    $diff | ForEach-Object {
+        $indicator = $_.SideIndicator
+        $data = $_
+        
+        if ($indicator -eq "=>") {
+            Write-Host "新增行 (只在新 DB):" -ForegroundColor Green
+            $data | Select-Object * -ExcludeProperty SideIndicator | Format-Table
+        }
+        elseif ($indicator -eq "<=") {
+            Write-Host "缺失行 (只在舊 DB):" -ForegroundColor Red
+            $data | Select-Object * -ExcludeProperty SideIndicator | Format-Table
+        }
+    }
+}
+
 if ($null -eq $diff) {
     Write-Host "🎉 恭喜！新舊資料庫的 Query 結果完全一致。" -ForegroundColor Cyan
 } else {
