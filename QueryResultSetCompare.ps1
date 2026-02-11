@@ -28,7 +28,21 @@ if ($oldData.Rows.Count -ne $newData.Rows.Count) {
 }
 
 # 3. 完全比對 (包括所有 Column 內容)
-$diff = Compare-Object $oldData $newData -Property ( $oldData.Columns.ColumnName ) -PassThru
+# 1. 取得所有欄位名稱
+$allColumns = $oldData.Columns.ColumnName
+
+# 2. 排除掉會變動的系統欄位
+$columnsToCompare = $allColumns | Where-Object { $_ -notin @("RowStatusDate", "AuditKey") }
+
+# 3. 指定 Property 進行精確比對
+$diff = Compare-Object $oldData $newData -Property $columnsToCompare -PassThru
+
+if ($null -eq $diff) {
+    Write-Host "✅ 業務資料完全一致 (已排除系統欄位)" -ForegroundColor Green
+} else {
+    Write-Host "❌ 發現業務資料差異！" -ForegroundColor Red
+    $diff | Out-GridView
+}
 
 # 假設 $diff 是你 Compare-Object 的結果
 if ($diff) {
