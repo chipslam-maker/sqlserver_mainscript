@@ -1,5 +1,5 @@
 # ============================================================
-# SQL Server Query Result Comparison Script v3
+# SQL Server Query Result Comparison Script v4
 # ============================================================
 
 # ── 設定區 ──────────────────────────────────────────────────
@@ -11,9 +11,8 @@ $OutputFolder = "C:\QueryCompare"      # 報告輸出資料夾
 $SqlFile      = "$PSScriptRoot\query.sql"  # SQL 檔案路徑（同一資料夾）
 
 # ── Composite Key 設定 ──────────────────────────────────────
-# 填入你想用來組合 Key 的欄位名稱（可以一個或多個）
-# 例子：只用一個欄位    $KeyColumns = @("ORDER_ID")
-# 例子：組合多個欄位    $KeyColumns = @("ORDER_ID", "PRODUCT_CODE", "DATE")
+# 只需改這一行！填入用來組合 Key 的欄位名稱（一個或多個）
+# 例子：$KeyColumns = @("ORDER_ID", "PRODUCT_CODE", "DATE")
 $KeyColumns = @("COL1", "COL2", "COL3")   # ← 改成你的欄位名
 
 # ============================================================
@@ -62,7 +61,6 @@ function Invoke-SqlQuery {
         $Adapter.Fill($DataSet) | Out-Null
         $Elapsed = (Get-Date) - $StartTime
 
-        # 取最後一個 Table（即 Query 最後 SELECT 的結果）
         $Table = $DataSet.Tables[$DataSet.Tables.Count - 1]
 
         Write-Host "  完成！共 $($Table.Rows.Count) 行，耗時 $($Elapsed.TotalSeconds.ToString('F1')) 秒" -ForegroundColor Green
@@ -78,15 +76,17 @@ function Invoke-SqlQuery {
     }
 }
 
-# ── 函數：DataTable 轉 Hashtable（支援 Composite Key）───────
+# ── 函數：DataTable 轉兩個 Hashtable ────────────────────────
+#    $HashByKey  : Key → 整行值（用於快速比較）
+#    $RowByKey   : Key → Row 物件（用於逐欄比較）
 function ConvertTo-Hashtable {
     param (
         [Parameter(Mandatory=$true)]
         [System.Data.DataTable]$Table,
-        [string[]]$KeyColumns        # 接受多個 Column 名稱
+        [string[]]$KeyColumns
     )
 
-    # 先確認所有 Key Column 都存在
+    # 確認所有 Key Column 都存在
     foreach ($Col in $KeyColumns) {
         if (-not $Table.Columns.Contains($Col)) {
             Write-Host "  ❌ 找不到欄位：$Col" -ForegroundColor Red
@@ -95,36 +95,60 @@ function ConvertTo-Hashtable {
         }
     }
 
-    $Hash = @{}
+    $HashByKey = @{}
+    $RowByKey  = @{}
     $DuplicateKeys = [System.Collections.Generic.List[string]]::new()
 
     foreach ($Row in $Table.Rows) {
-        # 把多個 Key Column 的值用 "~" 串起來組成 Composite Key
         $KeyParts = $KeyColumns | ForEach-Object {
             if ($Row[$_] -eq [DBNull]::Value) { "NULL" } else { $Row[$_].ToString() }
         }
         $Key = $KeyParts -join "~"
 
-        # 檢查是否有重複 Key（方便 Debug）
-        if ($Hash.ContainsKey($Key)) {
+        if ($HashByKey.ContainsKey($Key)) {
             $DuplicateKeys.Add($Key)
         }
 
-        # 所有欄位值串起來作比較內容
         $Values = ($Table.Columns.ColumnName | ForEach-Object {
             if ($Row[$_] -eq [DBNull]::Value) { "NULL" } else { $Row[$_].ToString() }
         }) -join "|"
 
-        $Hash[$Key] = $Values
+        $HashByKey[$Key] = $Values
+        $RowByKey[$Key]  = $Row  # 儲存整個 Row 方便逐欄比較
     }
 
-    # 如果有重複 Key，提示用戶
     if ($DuplicateKeys.Count -gt 0) {
-        Write-Host "  ⚠️  警告：發現 $($DuplicateKeys.Count) 個重複 Key，比較結果可能不準確！" -ForegroundColor Yellow
-        Write-Host "  建議增加更多 Key Column 以確保唯一性" -ForegroundColor Yellow
+        Write-Host "  ⚠️  警告：發現 $($DuplicateKeys.Count) 個重複 Key，建議增加更多 Key Column！" -ForegroundColor Yellow
     }
 
-    return $Hash
+    return $HashByKey, $RowByKey
+}
+
+# ── 函數：逐欄比較兩行，回傳差異欄位清單 ───────────────────
+function Get-ColumnDiff {
+    param (
+        $OldRow,
+        $NewRow,
+        [System.Data.DataColumnCollection]$Columns
+    )
+
+    $DiffColumns = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($Col in $Columns) {
+        $ColName = $Col.ColumnName
+        $OldVal  = if ($OldRow[$ColName] -eq [DBNull]::Value) { "NULL" } else { $OldRow[$ColName].ToString() }
+        $NewVal  = if ($NewRow[$ColName] -eq [DBNull]::Value) { "NULL" } else { $NewRow[$ColName].ToString() }
+
+        if ($OldVal -ne $NewVal) {
+            $DiffColumns.Add([PSCustomObject]@{
+                Column   = $ColName
+                舊Server值 = $OldVal
+                新Server值 = $NewVal
+            })
+        }
+    }
+
+    return $DiffColumns
 }
 
 # ============================================================
@@ -132,7 +156,7 @@ function ConvertTo-Hashtable {
 # ============================================================
 
 Write-Host "`n============================================" -ForegroundColor Yellow
-Write-Host " SQL Server Query 比較工具 v3" -ForegroundColor Yellow
+Write-Host " SQL Server Query 比較工具 v4" -ForegroundColor Yellow
 Write-Host "============================================`n" -ForegroundColor Yellow
 Write-Host "  使用 Composite Key：$($KeyColumns -join ' + ')" -ForegroundColor Cyan
 
@@ -148,23 +172,23 @@ $NewTable = [System.Data.DataTable]$NewTable
 
 # [3] 轉換並比較
 Write-Host "`n[3/4] 比較結果中..." -ForegroundColor Yellow
-$OldHash = ConvertTo-Hashtable -Table $OldTable -KeyColumns $KeyColumns
-$NewHash = ConvertTo-Hashtable -Table $NewTable -KeyColumns $KeyColumns
+$OldHashByKey, $OldRowByKey = ConvertTo-Hashtable -Table $OldTable -KeyColumns $KeyColumns
+$NewHashByKey, $NewRowByKey = ConvertTo-Hashtable -Table $NewTable -KeyColumns $KeyColumns
 
-$OnlyInOld = [System.Collections.Generic.List[string]]::new()  # 舊有新無
-$OnlyInNew = [System.Collections.Generic.List[string]]::new()  # 新有舊無
-$ValueDiff = [System.Collections.Generic.List[string]]::new()  # 值不同
+$OnlyInOld = [System.Collections.Generic.List[string]]::new()
+$OnlyInNew = [System.Collections.Generic.List[string]]::new()
+$ValueDiff = [System.Collections.Generic.List[string]]::new()
 
-foreach ($Key in $OldHash.Keys) {
-    if (-not $NewHash.ContainsKey($Key)) {
+foreach ($Key in $OldHashByKey.Keys) {
+    if (-not $NewHashByKey.ContainsKey($Key)) {
         $OnlyInOld.Add($Key)
-    } elseif ($OldHash[$Key] -ne $NewHash[$Key]) {
+    } elseif ($OldHashByKey[$Key] -ne $NewHashByKey[$Key]) {
         $ValueDiff.Add($Key)
     }
 }
 
-foreach ($Key in $NewHash.Keys) {
-    if (-not $OldHash.ContainsKey($Key)) {
+foreach ($Key in $NewHashByKey.Keys) {
+    if (-not $OldHashByKey.ContainsKey($Key)) {
         $OnlyInNew.Add($Key)
     }
 }
@@ -177,12 +201,12 @@ $IsMatch = ($OnlyInOld.Count -eq 0 -and $OnlyInNew.Count -eq 0 -and $ValueDiff.C
 Write-Host "`n============================================" -ForegroundColor Yellow
 Write-Host " 比較結果摘要" -ForegroundColor Yellow
 Write-Host "============================================" -ForegroundColor Yellow
-Write-Host "  Composite Key    : $($KeyColumns -join ' + ')"
-Write-Host "  舊 Server 行數   : $($OldTable.Rows.Count)"
-Write-Host "  新 Server 行數   : $($NewTable.Rows.Count)"
-Write-Host "  舊有新無         : $($OnlyInOld.Count) 行" -ForegroundColor $(if ($OnlyInOld.Count -gt 0) { "Red" } else { "Green" })
-Write-Host "  新有舊無         : $($OnlyInNew.Count) 行" -ForegroundColor $(if ($OnlyInNew.Count -gt 0) { "Red" } else { "Green" })
-Write-Host "  值不同           : $($ValueDiff.Count) 行" -ForegroundColor $(if ($ValueDiff.Count -gt 0) { "Red" } else { "Green" })
+Write-Host "  Composite Key  : $($KeyColumns -join ' + ')"
+Write-Host "  舊 Server 行數 : $($OldTable.Rows.Count)"
+Write-Host "  新 Server 行數 : $($NewTable.Rows.Count)"
+Write-Host "  舊有新無       : $($OnlyInOld.Count) 行" -ForegroundColor $(if ($OnlyInOld.Count -gt 0) { "Red" } else { "Green" })
+Write-Host "  新有舊無       : $($OnlyInNew.Count) 行" -ForegroundColor $(if ($OnlyInNew.Count -gt 0) { "Red" } else { "Green" })
+Write-Host "  值不同         : $($ValueDiff.Count) 行" -ForegroundColor $(if ($ValueDiff.Count -gt 0) { "Red" } else { "Green" })
 
 if ($IsMatch) {
     Write-Host "`n  ✅ 結果完全一致！" -ForegroundColor Green
@@ -194,31 +218,43 @@ if ($IsMatch) {
 $CsvPath = "$OutputFolder\Compare_$Timestamp.csv"
 $CsvRows = [System.Collections.Generic.List[PSCustomObject]]::new()
 
+# 舊有新無
 foreach ($Key in $OnlyInOld) {
     $CsvRows.Add([PSCustomObject]@{
         差異類型       = "舊有新無"
         COMPOSITE_KEY  = $Key
-        舊Server值     = $OldHash[$Key]
+        差異欄位       = ""
+        舊Server值     = $OldHashByKey[$Key]
         新Server值     = ""
     })
 }
 
+# 新有舊無
 foreach ($Key in $OnlyInNew) {
     $CsvRows.Add([PSCustomObject]@{
         差異類型       = "新有舊無"
         COMPOSITE_KEY  = $Key
+        差異欄位       = ""
         舊Server值     = ""
-        新Server值     = $NewHash[$Key]
+        新Server值     = $NewHashByKey[$Key]
     })
 }
 
+# 值不同 → 逐欄比較，每個差異欄位獨立一行
 foreach ($Key in $ValueDiff) {
-    $CsvRows.Add([PSCustomObject]@{
-        差異類型       = "值不同"
-        COMPOSITE_KEY  = $Key
-        舊Server值     = $OldHash[$Key]
-        新Server值     = $NewHash[$Key]
-    })
+    $OldRow  = $OldRowByKey[$Key]
+    $NewRow  = $NewRowByKey[$Key]
+    $ColDiffs = Get-ColumnDiff -OldRow $OldRow -NewRow $NewRow -Columns $OldTable.Columns
+
+    foreach ($Diff in $ColDiffs) {
+        $CsvRows.Add([PSCustomObject]@{
+            差異類型       = "值不同"
+            COMPOSITE_KEY  = $Key
+            差異欄位       = $Diff.Column      # ← 具體哪個 Column 不同
+            舊Server值     = $Diff.舊Server值
+            新Server值     = $Diff.新Server值
+        })
+    }
 }
 
 if ($CsvRows.Count -gt 0) {
